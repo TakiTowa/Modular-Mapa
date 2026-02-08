@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox, simpledialog
 import os
 from geoprocessor import GeoProcessor
 from PIL import Image, ImageTk
+import random
 
 # --- CONFIGURACIÓN ---
 LAT_BASE, LON_BASE = 20.65723843858684, -103.32558015040448 
@@ -51,7 +52,7 @@ class MatrizApp:
         self.canvas.grid(row=1, column=1, padx=10, pady=10)
         
         self.modo_poi = tk.BooleanVar(value=False)
-        tk.Checkbutton(frame_main, text="📍 Modo: Añadir Punto de Interés", 
+        tk.Checkbutton(frame_main, text="📍 Modo: Añadir POI", 
                        variable=self.modo_poi, font=("Arial", 9, "bold")).grid(row=0, column=1)
 
         self.canvas.bind("<Button-1>", self.on_click_canvas)
@@ -70,12 +71,11 @@ class MatrizApp:
         tk.Label(frame_bitacora, text="📜 Bitácora de Exploración", font=("Arial", 12, "bold")).pack(pady=10)
         self.lista_txt = tk.Text(frame_bitacora, height=15, width=50, state="disabled")
         self.lista_txt.pack(padx=10, pady=10, fill="both", expand=True)
-        tk.Label(frame_bitacora, text="Registro de puntos de interés y notas.", font=("Arial", 8, "italic")).pack()
 
     def añadir_punto_interes(self, event):
         c, f = event.x // TAMANO_CUADRO_PX, event.y // TAMANO_CUADRO_PX
         lat, lon = self.convertir_a_coordenadas_geograficas(f, c)
-        comentario = simpledialog.askstring("Punto de Interés", "Escribe una nota:") 
+        comentario = simpledialog.askstring("Punto de Interés", "Nota para este lugar:") 
         if comentario:
             self.puntos_interes.append({"lat": lat, "lon": lon, "nota": comentario})
             self.actualizar_lista_bitacora()
@@ -131,6 +131,16 @@ class MatrizApp:
             lat, lon = self.convertir_a_coordenadas_geograficas(f, c)
             self.processor.agregar_punto(lat, lon)
 
+    def ia_sugerir_ruta(self):
+        """Simulación de IA para sugerir una zona de exploración diaria"""
+        opciones = [(f, c) for f in range(FILAS) for c in range(COLUMNAS) 
+                    if (f, c) not in self.clics_unicos]
+        if opciones:
+            f, c = random.choice(opciones)
+            rect_id = self.current_cuadros_ids.get((f, c))
+            self.canvas.itemconfig(rect_id, fill="#F1C40F") # Color de medalla 
+            messagebox.showinfo("Sugerencia IA", f"La IA recomienda explorar el sector ({f}, {c}) para registrar nuevos barrios.")
+
     def dibujar_cuadricula(self):
         self.canvas.delete("all")
         for f in range(FILAS):
@@ -155,7 +165,9 @@ class MatrizApp:
     def crear_botones_control(self, frame):
         f_btn = tk.Frame(frame)
         f_btn.grid(row=2, column=1, pady=10)
-        tk.Button(f_btn, text="Generar Mapa HTML", command=self.generar_mapa_final, bg="#2ecc71", fg="white").pack(side=tk.LEFT, padx=10)
+        # Nuevo botón para activar la IA
+        tk.Button(f_btn, text="🤖 IA Sugerencia", command=self.ia_sugerir_ruta, bg="#F1C40F", fg="black", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=10)
+        tk.Button(f_btn, text="Generar Mapa", command=self.generar_mapa_final, bg="#2ecc71", fg="white").pack(side=tk.LEFT, padx=10)
         tk.Button(f_btn, text="Salir", command=self.master.quit, bg="#e74c3c", fg="white").pack(side=tk.LEFT, padx=10)
 
     def convertir_a_coordenadas_geograficas(self, f, c):
