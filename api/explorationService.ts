@@ -1,12 +1,18 @@
 // api/explorationService.ts
+// este archivo maneja la lógica de almacenamiento y recuperación de las celdas 
+// exploradas por el usuario. Utiliza AsyncStorage para guardar los datos localmente 
+// en el dispositivo. Las funciones principales son getExploredCells para obtener 
+// la lista de celdas exploradas y exploreCell para marcar una celda como explorada.
+// simula el uso de una api, para despues poder migrar a un backend real.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const STORAGE_KEY = "EXPLORED_CELLS";
 
-/**
- * Simula obtener las celdas exploradas desde backend
- */
+
+// ================================
+// OBTENER CELDAS
+// ================================
 export async function getExploredCells(): Promise<string[]> {
   try {
     const saved = await AsyncStorage.getItem(STORAGE_KEY);
@@ -14,34 +20,36 @@ export async function getExploredCells(): Promise<string[]> {
 
     const parsed = JSON.parse(saved);
 
-    // Si ya es array (nuevo formato)
     if (Array.isArray(parsed)) {
       return parsed;
     }
 
-    // Si es objeto (formato viejo)
-    if (typeof parsed === "object") {
+    if (typeof parsed === "object" && parsed !== null) {
       return Object.keys(parsed);
     }
 
     return [];
   } catch (error) {
-    console.log("Error getting explored cells", error);
+    console.log("Error getting explored cells:", error);
     return [];
   }
 }
 
 
-/**
- * Simula enviar nueva exploración al backend
- */
+// ================================
+// EXPLORAR CELDA
+// ================================
 export async function exploreCell(cellKey: string): Promise<boolean> {
   try {
     const saved = await AsyncStorage.getItem(STORAGE_KEY);
     let explored: string[] = saved ? JSON.parse(saved) : [];
 
+    if (!Array.isArray(explored)) {
+      explored = [];
+    }
+
     if (explored.includes(cellKey)) {
-      return false; // ya estaba explorada
+      return false;
     }
 
     explored.push(cellKey);
@@ -51,9 +59,9 @@ export async function exploreCell(cellKey: string): Promise<boolean> {
       JSON.stringify(explored)
     );
 
-    return true; // fue nueva
+    return true;
   } catch (error) {
-    console.log("Error exploring cell", error);
+    console.log("Error exploring cell:", error);
     return false;
   }
 }
