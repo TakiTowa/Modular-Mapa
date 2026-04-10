@@ -3,8 +3,8 @@ import 'dotenv/config';
 export default {
   expo: {
     name: "niebla-go",
-    slug: "niebla-go-hernandez", // <-- Cambio de slug
-    owner: "hernandez.0717",     // <-- Agregamos tu usuario
+    slug: "niebla-go",  // <-- Quítale el "-hernandez"
+    owner: "hernandez.0717",
     version: "1.0.0",
     orientation: "portrait",
     icon: "./assets/images/icon.png",
