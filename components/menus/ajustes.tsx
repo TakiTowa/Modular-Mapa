@@ -1,6 +1,7 @@
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useState } from "react";
 import {
+  Alert,
   ScrollView,
   StyleSheet,
   Switch,
@@ -10,16 +11,14 @@ import {
 } from "react-native";
 
 import { useMapSettings } from "@/context/mapConfig";
+import { logoutUser } from "@/api/authService";
 
 export default function AjustesMenu() {
-  // Switch independientes
   const [darkMode, setDarkMode] = useState(true);
   const [vibration, setVibration] = useState(true);
   const [sound, setSound] = useState(true);
   const [music, setMusic] = useState(false);
 
-  // const [selectedMap, setSelectedMap] = useState("Estandar");
-  // const [selectedFog, setSelectedFog] = useState("#000000");
   const { mapStyle, setMapStyle, fogColor, setFogColor } = useMapSettings();
 
   const mapStyles = [
@@ -31,16 +30,37 @@ export default function AjustesMenu() {
   ];
 
   const fogColors = [
-    "#000000", // negro default
-    "#3b82f6", // azul
-    "#22c55e", // verde
-    "#ef4444", // rojo
-    "#f59e0b", // naranja
-    "#a855f7", // morado
-    "#ec4899", // rosa
-    "#14b8a6", // turquesa
+    "#000000",
+    "#3b82f6",
+    "#22c55e",
+    "#ef4444",
+    "#f59e0b",
+    "#a855f7",
+    "#ec4899",
+    "#14b8a6",
   ];
 
+  const handleLogout = () => {
+    Alert.alert(
+      "Cerrar sesión",
+      "¿Estás seguro que quieres cerrar tu sesión?",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Cerrar sesión",
+          style: "destructive",
+          onPress: async () => {
+            const result = await logoutUser();
+            if (!result.success) {
+              Alert.alert("Error", result.message);
+            }
+            // Si tiene éxito, el onAuthStateChange en _layout.tsx
+            // redirige automáticamente al login.
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <ScrollView
@@ -49,7 +69,7 @@ export default function AjustesMenu() {
     >
       <Text style={styles.title}>Ajustes</Text>
 
-      {/* CONFIGURACION GENERAL */}
+      {/* CONFIGURACIÓN GENERAL */}
       <View style={styles.card}>
         <SettingRow label="Modo oscuro" value={darkMode} setValue={setDarkMode} />
         <SettingRow label="Vibración" value={vibration} setValue={setVibration} />
@@ -64,10 +84,7 @@ export default function AjustesMenu() {
           {mapStyles.map((style) => (
             <TouchableOpacity
               key={style}
-              style={[
-                styles.mapCard,
-                mapStyle === style && styles.selectedCard,
-              ]}
+              style={[styles.mapCard, mapStyle === style && styles.selectedCard]}
               onPress={() => setMapStyle(style)}
             >
               <MaterialCommunityIcons
@@ -75,12 +92,7 @@ export default function AjustesMenu() {
                 size={28}
                 color={mapStyle === style ? "#22d3ee" : "#aaa"}
               />
-              <Text
-                style={[
-                  styles.mapText,
-                  mapStyle === style && { color: "#22d3ee" },
-                ]}
-              >
+              <Text style={[styles.mapText, mapStyle === style && { color: "#22d3ee" }]}>
                 {style}
               </Text>
             </TouchableOpacity>
@@ -106,7 +118,7 @@ export default function AjustesMenu() {
         </View>
       </ScrollView>
 
-      {/* INFORMACION */}
+      {/* INFORMACIÓN */}
       <Text style={styles.section}>Información</Text>
       <View style={styles.card}>
         <InfoRow label="Acerca del proyecto" icon="information-circle-outline" />
@@ -114,11 +126,16 @@ export default function AjustesMenu() {
         <InfoRow label="Versión 1.0.0" icon="code-slash-outline" />
         <InfoRow label="Política de privacidad" icon="document-text-outline" />
       </View>
+
+      {/* SESIÓN */}
+      <Text style={styles.section}>Sesión</Text>
+      <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+        <Ionicons name="log-out-outline" size={20} color="#ef4444" />
+        <Text style={styles.logoutText}>Cerrar sesión</Text>
+      </TouchableOpacity>
     </ScrollView>
   );
 }
-
-
 
 /* COMPONENTES AUXILIARES */
 
@@ -132,11 +149,7 @@ function SettingRow({ label, value, setValue }: SettingRowProps) {
   return (
     <View style={styles.row}>
       <Text style={styles.label}>{label}</Text>
-      <Switch
-        value={value}
-        onValueChange={setValue}
-        trackColor={{ true: "#22d3ee" }}
-      />
+      <Switch value={value} onValueChange={setValue} trackColor={{ true: "#22d3ee" }} />
     </View>
   );
 }
@@ -167,14 +180,12 @@ const styles = StyleSheet.create({
     color: "#22d3ee",
     marginBottom: 20,
   },
-
   section: {
     fontSize: 18,
     color: "#22d3ee",
     marginTop: 20,
     marginBottom: 10,
   },
-
   card: {
     backgroundColor: "rgba(255,255,255,0.05)",
     padding: 20,
@@ -183,24 +194,20 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(34,211,238,0.15)",
   },
-
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 18,
   },
-
   label: {
     color: "#fff",
     fontSize: 15,
   },
-
   horizontalContainer: {
     flexDirection: "row",
     marginBottom: 30,
   },
-
   mapCard: {
     width: 120,
     backgroundColor: "rgba(255,255,255,0.05)",
@@ -211,19 +218,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
   },
-
   selectedCard: {
     borderColor: "#22d3ee",
     backgroundColor: "rgba(34,211,238,0.08)",
   },
-
   mapText: {
     marginTop: 8,
     fontSize: 12,
     color: "#aaa",
     textAlign: "center",
   },
-
   colorCircle: {
     width: 50,
     height: 50,
@@ -232,11 +236,9 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: "transparent",
   },
-
   selectedColor: {
     borderColor: "#fff",
   },
-
   infoRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -245,10 +247,27 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.05)",
   },
-
   infoText: {
     color: "#fff",
     marginLeft: 10,
     fontSize: 14,
+  },
+  logoutButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: "rgba(239,68,68,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.3)",
+    borderRadius: 18,
+    paddingVertical: 16,
+    marginTop: 10,
+    marginBottom: 20,
+  },
+  logoutText: {
+    color: "#ef4444",
+    fontSize: 16,
+    fontWeight: "600",
   },
 });

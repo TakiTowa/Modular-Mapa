@@ -7,11 +7,7 @@ import { useMapSettings } from "@/context/mapConfig";
 import MapboxGL from "@rnmapbox/maps";
 import * as turf from "@turf/turf";
 import * as Location from "expo-location";
-import type {
-  Feature,
-  MultiPolygon,
-  Polygon
-} from "geojson";
+import type { Feature, MultiPolygon, Polygon } from "geojson";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -22,51 +18,48 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { exploreCell, getExploredCells } from "../api/explorationService";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+
+import { getExploredCells, queueCellForSync } from "../api/explorationService";
+import {
+  Place,
+  getPlaces,
+  getPopularPlaces,
+  getVisitedPlaceIds,
+  rewardPlaceVisit,
+} from "../api/placesService";
+import { endSession, startSession, updateSessionDistance } from "../api/sessionservice";
 
 // ================================
-// CONFIGURACIÓN MAPBOX
+// CONFIGURACIÓN
 // ================================
 MapboxGL.setAccessToken(process.env.EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN || "");
 MapboxGL.setTelemetryEnabled(false);
 
-// ================================
-// CONFIGURACIÓN DE CUADRÍCULA
-// ================================
-const CELL_SIZE = 0.00045; //0.00045 Tamaño de cada celda en grados (~50m aprox)
-const CELL_RADIUS = 30; // 30 Radio de revelado en metros (25-30m)
+const CELL_SIZE = 0.00045;
+const CELL_RADIUS = 30;
+const PLACE_DETECT_RADIUS_M = 50;
 
 // ================================
-// CÍRCULO SIMULADO 
+// HELPERS GEOMÉTRICOS
 // ================================
-/**
- * Crea un círculo aproximado en coordenadas lng/lat
- * Usamos trigonometría manual para evitar cálculos pesados de Turf
- */
-
 function createCircle(center: [number, number], radiusInMeters: number) {
-  const points = 64; // suaviza el círculo con más puntos 
+  const points = 64;
   const coords = [];
-
   const distanceX =
-    radiusInMeters /
-    (111320 * Math.cos((center[1] * Math.PI) / 180));
+    radiusInMeters / (111320 * Math.cos((center[1] * Math.PI) / 180));
   const distanceY = radiusInMeters / 110574;
-
   for (let i = 0; i < points; i++) {
     const theta = (i / points) * (2 * Math.PI);
-    const x = distanceX * Math.cos(theta);
-    const y = distanceY * Math.sin(theta);
-
-    coords.push([center[0] + x, center[1] + y]);
+    coords.push([
+      center[0] + distanceX * Math.cos(theta),
+      center[1] + distanceY * Math.sin(theta),
+    ]);
   }
-
-  coords.push(coords[0]); // cerrar el polígono
+  coords.push(coords[0]);
   return coords;
 }
 
-
-// Convierte una cellKey en su círculo geográfico correspondiente
 function getCellCircle(cellKey: string, radius: number) {
   const [x, y] = cellKey.split("_").map(Number);
   const lat = x * CELL_SIZE + CELL_SIZE / 2;
@@ -74,221 +67,265 @@ function getCellCircle(cellKey: string, radius: number) {
   return createCircle([lon, lat], radius);
 }
 
+function getCellKey(lat: number, lon: number) {
+  const x = Math.floor(lat / CELL_SIZE);
+  const y = Math.floor(lon / CELL_SIZE);
+  return `${x}_${y}`;
+}
+
+function safeUnion(
+  features: Feature<Polygon | MultiPolygon>[]
+): Feature<Polygon | MultiPolygon> | null {
+  if (features.length === 0) return null;
+  if (features.length === 1) return features[0];
+  return turf.union(turf.featureCollection(features)) as Feature<
+    Polygon | MultiPolygon
+  > | null;
+}
+
+function getDistanceMeters(
+  lat1: number, lon1: number,
+  lat2: number, lon2: number
+): number {
+  return turf.distance(
+    turf.point([lon1, lat1]),
+    turf.point([lon2, lat2]),
+    { units: "meters" }
+  );
+}
+
+// ================================
+// TOAST DE RECOMPENSA
+// ================================
+type RewardToast = { placeName: string; xp: number };
+
+function PlaceRewardToast({ toast, onHide, topInset }: { toast: RewardToast; onHide: () => void; topInset: number }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.sequence([
+      Animated.timing(opacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.delay(2500),
+      Animated.timing(opacity, { toValue: 0, duration: 400, useNativeDriver: true }),
+    ]).start(onHide);
+  }, []);
+
+  return (
+    <Animated.View style={[toastStyles.container, { opacity, top: topInset + 12 }]}>
+      <Text style={toastStyles.emoji}>📍</Text>
+      <View>
+        <Text style={toastStyles.title}>¡Lugar descubierto!</Text>
+        <Text style={toastStyles.name}>{toast.placeName}</Text>
+      </View>
+      <View style={toastStyles.xpBadge}>
+        <Text style={toastStyles.xpText}>+{toast.xp} XP</Text>
+      </View>
+    </Animated.View>
+  );
+}
+
+const toastStyles = StyleSheet.create({
+  container: {
+    position: "absolute",
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "rgba(10,20,40,0.95)",
+    borderWidth: 1,
+    borderColor: "rgba(34,211,238,0.4)",
+    borderRadius: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    zIndex: 100,
+    shadowColor: "#22d3ee",
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 20,
+  },
+  emoji: { fontSize: 24 },
+  title: { color: "#22d3ee", fontSize: 12, fontWeight: "600" },
+  name: { color: "#fff", fontSize: 15, fontWeight: "700" },
+  xpBadge: {
+    backgroundColor: "rgba(34,211,238,0.15)",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  xpText: { color: "#22d3ee", fontWeight: "800", fontSize: 14 },
+});
+
 // ================================
 // COMPONENTE PRINCIPAL
 // ================================
 export default function MapScreen() {
+  const insets = useSafeAreaInsets();
 
-  // ESTADO BASE
-  const [location, setLocation] =
-    useState<Location.LocationObject | null>(null);
+  const [location, setLocation] = useState<Location.LocationObject | null>(null);
+  const [explored, setExplored] = useState<Record<string, boolean>>({});
+  const [popularPlaces, setPopularPlaces] = useState<any[]>([]);
+  const [places, setPlaces] = useState<Place[]>([]);
+  const [rewardToast, setRewardToast] = useState<RewardToast | null>(null);
 
-  const [explored, setExplored] =
-    useState<Record<string, boolean>>({});
+  const visitedPlaceIds = useRef<Set<string>>(new Set());
+  const lastPosition = useRef<{ lat: number; lon: number } | null>(null);
+  const pendingDistanceM = useRef(0);
+  const distanceFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [loading, setLoading] = useState(true);
-
-  // REFERENCIAS MAPA Y CÁMARA
   const cameraRef = useRef<MapboxGL.Camera>(null);
   const mapRef = useRef<MapboxGL.MapView>(null);
 
-   /**
-   * Geometría unificada de todas las áreas exploradas
-   * Puede ser Polygon o MultiPolygon dependiendo de la forma
-   */
-  const [mergedGeometry, setMergedGeometry] =
-    useState<Feature<Polygon | MultiPolygon> | null>(null);
-
-  const [animatedCell, setAnimatedCell] =
-    useState<string | null>(null);
-
-  const [animatedRadiusValue, setAnimatedRadiusValue] =
-    useState(0);
-
-  // ANIMACIONES
+  const [mergedGeometry, setMergedGeometry] = useState<Feature<Polygon | MultiPolygon> | null>(null);
   const animatedRadius = useRef(new Animated.Value(0)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const loadingFade = useRef(new Animated.Value(1)).current;
-
   const [showLoading, setShowLoading] = useState(true);
   const [mapReady, setMapReady] = useState(false);
 
-
-  // CONFIGURACIÓN DE MAPA Y NIEBLA DESDE CONTEXTO
   const { mapStyle, fogColor } = useMapSettings();
 
   // ================================
-  // FUNCIÓN PARA ANIMAR CELDA
+  // SESIÓN
   // ================================
-  const triggerCellAnimation = (cellKey: string) => {
-    setAnimatedCell(cellKey);
-    animatedRadius.setValue(0);
+  useEffect(() => {
+    startSession();
+    return () => {
+      if (distanceFlushTimer.current) clearTimeout(distanceFlushTimer.current);
+      flushDistance();
+      endSession();
+    };
+  }, []);
 
-    const listenerId = animatedRadius.addListener(
-      ({ value }) => {
-        setAnimatedRadiusValue(value);
-      }
-    );
+  const flushDistance = () => {
+    if (pendingDistanceM.current > 0) {
+      updateSessionDistance(pendingDistanceM.current);
+      pendingDistanceM.current = 0;
+    }
+    if (distanceFlushTimer.current) {
+      clearTimeout(distanceFlushTimer.current);
+      distanceFlushTimer.current = null;
+    }
+  };
 
-    Animated.timing(animatedRadius, {
-      toValue: CELL_RADIUS,
-      duration: 600,
-      useNativeDriver: false,
-    }).start(() => {
-      animatedRadius.removeListener(listenerId);
-    });
+  const accumulateDistance = (meters: number) => {
+    pendingDistanceM.current += meters;
+    if (pendingDistanceM.current >= 100) { flushDistance(); return; }
+    if (!distanceFlushTimer.current) {
+      distanceFlushTimer.current = setTimeout(flushDistance, 30_000);
+    }
   };
 
   // ================================
-  // NIEBLA GLOBAL (WORLD - EXPLORED)
+  // NIEBLA
   // ================================
-  /**
-   * Calcula:
-   *  MUNDO - ÁREA EXPLORADA = NIEBLA
-   *
-   * Se recalcula SOLO cuando mergedGeometry cambia
-   */
-  const fogShape: Feature<Polygon | MultiPolygon> | null =
-    React.useMemo(() => {
-      if (!mergedGeometry) return null;
-
-      const world = turf.polygon([
-        [
-          [-180, -85],
-          [180, -85],
-          [180, 85],
-          [-180, 85],
-          [-180, -85],
-        ],
-      ]);
-
-      const diff = turf.difference(
-        turf.featureCollection([world, mergedGeometry])
-      );
-
-      return diff as Feature<Polygon | MultiPolygon> | null;
-    }, [mergedGeometry]);
+  const fogShape: Feature<Polygon | MultiPolygon> | null = React.useMemo(() => {
+    if (!mergedGeometry) return null;
+    const world = turf.polygon([
+      [[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]],
+    ]);
+    return turf.difference(
+      turf.featureCollection([world, mergedGeometry])
+    ) as Feature<Polygon | MultiPolygon> | null;
+  }, [mergedGeometry]);
 
   // ================================
-  // CUADRÍCULA
+  // DATOS INICIALES
   // ================================
-  //Obtiene la clave única de la celda basada en lat/lon
-  function getCellKey(lat: number, lon: number) {
-    const x = Math.floor(lat / CELL_SIZE);
-    const y = Math.floor(lon / CELL_SIZE);
-    return `${x}_${y}`;
-  }
+  useEffect(() => {
+    getPopularPlaces().then((data) => { if (data) setPopularPlaces(data); });
+    Promise.all([getPlaces(), getVisitedPlaceIds()]).then(([fetchedPlaces, visited]) => {
+      setPlaces(fetchedPlaces);
+      visitedPlaceIds.current = visited;
+    });
+  }, []);
 
   // ================================
-  // CARGAR PROGRESO + GPS
+  // LUGARES CERCANOS
+  // ================================
+  const checkNearbyPlaces = async (lat: number, lon: number, currentPlaces: Place[]) => {
+    for (const place of currentPlaces) {
+      if (visitedPlaceIds.current.has(place.id)) continue;
+      const distance = getDistanceMeters(lat, lon, place.latitude, place.longitude);
+      if (distance <= PLACE_DETECT_RADIUS_M) {
+        visitedPlaceIds.current.add(place.id);
+        const result = await rewardPlaceVisit(place.id, place.reward_xp);
+        if (result.success) setRewardToast({ placeName: place.name, xp: place.reward_xp });
+      }
+    }
+  };
+
+  // ================================
+  // GPS
   // ================================
   useEffect(() => {
     (async () => {
-      // Cargar progreso previo
       const cells = await getExploredCells();
-
-      // Mapear celdas exploradas a geometrías y unificar en una sola
-      if (cells && Array.isArray(cells) && cells.length > 0) {
+      if (cells && cells.length > 0) {
         const mapped: Record<string, boolean> = {};
-        
         const circleFeatures = cells.map((cell: string) => {
           mapped[cell] = true;
-          return turf.polygon([
-            getCellCircle(cell, CELL_RADIUS),
-          ]);
+          return turf.polygon([getCellCircle(cell, CELL_RADIUS)]) as Feature<Polygon>;
         });
-
-        // UNA SOLA UNION GLOBAL
-        const merged = turf.union(
-          turf.featureCollection(circleFeatures)
-        );
-
-        if (merged) {
-          setMergedGeometry(
-            merged as Feature<Polygon | MultiPolygon>
-          );
-        }
-
+        const merged = safeUnion(circleFeatures);
+        if (merged) setMergedGeometry(merged);
         setExplored(mapped);
       }
-      
-      // Solicitar permisos de ubicación
-      const { status } =
-        await Location.requestForegroundPermissionsAsync();
+
+      const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") return;
 
-      // Iniciar seguimiento de ubicación
       await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.High,
-          timeInterval: 1000,
-          distanceInterval: 5,
-        },
+        { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 5 },
         async (loc) => {
+          const { latitude, longitude } = loc.coords;
           setLocation(loc);
 
-          const key = getCellKey(
-            loc.coords.latitude,
-            loc.coords.longitude
-          );
+          if (lastPosition.current) {
+            const delta = getDistanceMeters(
+              lastPosition.current.lat, lastPosition.current.lon,
+              latitude, longitude
+            );
+            if (delta < 50) accumulateDistance(delta);
+          }
+          lastPosition.current = { lat: latitude, lon: longitude };
 
+          const key = getCellKey(latitude, longitude);
           setExplored((prev) => {
             if (prev[key]) return prev;
-
-            const newCircle = turf.polygon([
-              getCellCircle(key, CELL_RADIUS),
-            ]);
-
+            const newCircle = turf.polygon([getCellCircle(key, CELL_RADIUS)]) as Feature<Polygon>;
             setMergedGeometry((prevGeom) => {
               if (!prevGeom) return newCircle;
-
-              const collection =
-                turf.featureCollection([
-                  prevGeom,
-                  newCircle,
-                ]);
-
-              const merged = turf.union(collection);
-
-              return (
-                (merged as
-                  | Feature<Polygon | MultiPolygon>
-                  | null) ?? prevGeom
-              );
+              return safeUnion([prevGeom as Feature<Polygon | MultiPolygon>, newCircle]) ?? prevGeom;
             });
-
-            exploreCell(key);
-            triggerCellAnimation(key);
-
+            queueCellForSync(key);
+            animatedRadius.setValue(0);
+            Animated.timing(animatedRadius, { toValue: CELL_RADIUS, duration: 600, useNativeDriver: false }).start();
             return { ...prev, [key]: true };
           });
 
-          setLoading(false);
+          setPlaces((currentPlaces) => {
+            checkNearbyPlaces(latitude, longitude, currentPlaces);
+            return currentPlaces;
+          });
         }
       );
     })();
   }, []);
 
   // ================================
-  // ANIMACIONES DE APARICIÓN
-  // ================================ 
+  // APARICIÓN
+  // ================================
   useEffect(() => {
     if (mapReady && location) {
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 600,
-        useNativeDriver: true,
-      }).start();
-
-      Animated.timing(loadingFade, {
-        toValue: 0,
-        duration: 600,
-        useNativeDriver: true,
-      }).start(() => {
-        setShowLoading(false);
-      });
+      Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+      Animated.timing(loadingFade, { toValue: 0, duration: 600, useNativeDriver: true }).start(
+        () => setShowLoading(false)
+      );
     }
   }, [mapReady, location]);
+
+  // Altura del botón de ubicación: por encima del BottomNav (70px) + safe area bottom
+  const locationButtonBottom = 70 + insets.bottom + 16;
 
   // ================================
   // RENDER
@@ -296,31 +333,54 @@ export default function MapScreen() {
   return (
     <View style={{ flex: 1 }}>
       {location && (
-        <Animated.View
-          style={[styles.container, { opacity: fadeAnim }]}
-        >
-          <MapboxGL.MapView // Mapa base
+        <Animated.View style={[StyleSheet.absoluteFill, { opacity: fadeAnim }]}>
+          <MapboxGL.MapView
             ref={mapRef}
             style={StyleSheet.absoluteFill}
-            styleURL={`mapbox://styles/mapbox/${mapStyle.toLowerCase()}`} // ajusta nombres según Mapbox
+            styleURL={`mapbox://styles/mapbox/${mapStyle.toLowerCase()}`}
             onDidFinishLoadingMap={() => setMapReady(true)}
+            // Desplazar el ornamento de escala para que no quede bajo el status bar
+            scaleBarPosition={{ top: insets.top + 8, left: 8 }}
+            compassViewPosition={1}
+            compassViewMargins={{ x: 16, y: insets.top + 8 }}
           >
-            <MapboxGL.Camera // Cámara centrada en el usuario
+            <MapboxGL.Camera
               ref={cameraRef}
               zoomLevel={18}
-              centerCoordinate={[
-                location.coords.longitude,
-                location.coords.latitude,
-              ]}
+              centerCoordinate={[location.coords.longitude, location.coords.latitude]}
             />
             <MapboxGL.UserLocation visible />
-            
-            {fogShape && ( // Capa de niebla global
-              <MapboxGL.ShapeSource
-                id="fog-source"
-                shape={fogShape}
+
+            {popularPlaces.map((place) => (
+              <MapboxGL.PointAnnotation
+                key={place.id}
+                id={place.id}
+                coordinate={[place.longitude, place.latitude]}
               >
-                <MapboxGL.FillLayer // Capa de relleno para la niebla
+                <View style={styles.hotspotMarker}>
+                  <Text style={styles.hotspotText}>🔥</Text>
+                </View>
+              </MapboxGL.PointAnnotation>
+            ))}
+
+            {places.map((place) => {
+              const visited = visitedPlaceIds.current.has(place.id);
+              return (
+                <MapboxGL.PointAnnotation
+                  key={place.id}
+                  id={`place-${place.id}`}
+                  coordinate={[place.longitude, place.latitude]}
+                >
+                  <View style={[styles.placeMarker, visited && styles.placeMarkerVisited]}>
+                    <Text style={styles.placeText}>{visited ? "✅" : "📍"}</Text>
+                  </View>
+                </MapboxGL.PointAnnotation>
+              );
+            })}
+
+            {fogShape && (
+              <MapboxGL.ShapeSource id="fog-source" shape={fogShape}>
+                <MapboxGL.FillLayer
                   id="fog-layer"
                   style={{
                     fillColor: fogColor,
@@ -335,68 +395,52 @@ export default function MapScreen() {
       )}
 
       {showLoading && (
-        <Animated.View // Overlay de carga
-          style={[
-            styles.loadingOverlayAbsolute,
-            { opacity: loadingFade },
-          ]}
-        >
-          <Image // Imagen de fondo para la pantalla de carga
-            source={require(
-              "../assets/images/splash-icon.png"
-            )}
-            style={styles.loadingImage}
+        <Animated.View style={[styles.loadingOverlay, { opacity: loadingFade }]}>
+          <Image
+            source={require("../assets/images/splash-icon.png")}
+            style={StyleSheet.absoluteFill}
             resizeMode="cover"
           />
-          <ActivityIndicator 
-            size="large"
-            color="#22d3ee"
-          />
-          <Text style={styles.loadingText}>
-            Cargando mapa...
-          </Text>
+          <ActivityIndicator size="large" color="#22d3ee" />
+          <Text style={styles.loadingText}>Cargando mapa...</Text>
         </Animated.View>
       )}
 
+      {rewardToast && (
+        <PlaceRewardToast
+          toast={rewardToast}
+          onHide={() => setRewardToast(null)}
+          topInset={insets.top}
+        />
+      )}
+
       {location && (
-        <TouchableOpacity // Botón para centrar en la ubicación actual
-          style={styles.myLocationButton}
-          onPress={() => {
+        <TouchableOpacity
+          style={[styles.myLocationButton, { bottom: locationButtonBottom }]}
+          onPress={() =>
             cameraRef.current?.setCamera({
-              centerCoordinate: [
-                location.coords.longitude,
-                location.coords.latitude,
-              ],
+              centerCoordinate: [location.coords.longitude, location.coords.latitude],
               zoomLevel: 18,
               heading: 0,
               pitch: 0,
               animationDuration: 800,
-            });
-          }}
+            })
+          }
         >
           <Text style={styles.buttonText}>🧭</Text>
         </TouchableOpacity>
       )}
 
-      {/* Menu de misiones */}
-      <MissionsMenu /> 
-      {/* Barra de navegación inferior */}
-      <GameMenu />
+      {/* MissionsMenu y GameMenu reciben el inset para posicionarse correctamente */}
+      <MissionsMenu topInset={insets.top} bottomInset={insets.bottom} />
+      <GameMenu bottomInset={insets.bottom} />
     </View>
   );
 }
 
-// ================================
-// ESTILOS
-// ================================
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "black",
-  },
   myLocationButton: {
     position: "absolute",
-    bottom: 120,
     right: 20,
     backgroundColor: "#1e90ff",
     width: 60,
@@ -406,26 +450,42 @@ const styles = StyleSheet.create({
     alignItems: "center",
     elevation: 8,
   },
-  buttonText: {
-    color: "white",
-    fontSize: 22,
-  },
-  loadingOverlayAbsolute: {
+  buttonText: { color: "white", fontSize: 22 },
+  loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#020617",
     justifyContent: "center",
     alignItems: "center",
     zIndex: 999,
   },
-  loadingImage: {
-    ...StyleSheet.absoluteFillObject,
-    width: "100%",
-    height: "100%",
+  loadingText: { marginTop: 15, color: "#e2e8f0", fontSize: 16, fontWeight: "500" },
+  hotspotMarker: {
+    backgroundColor: "rgba(255, 69, 0, 0.8)",
+    padding: 8,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: "#ffeb3b",
+    shadowColor: "#ff4500",
+    shadowOpacity: 0.8,
+    shadowRadius: 10,
+    elevation: 10,
   },
-  loadingText: {
-    marginTop: 15,
-    color: "#e2e8f0",
-    fontSize: 16,
-    fontWeight: "500",
+  hotspotText: { fontSize: 16 },
+  placeMarker: {
+    backgroundColor: "rgba(34,211,238,0.15)",
+    padding: 8,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: "#22d3ee",
+    shadowColor: "#22d3ee",
+    shadowOpacity: 0.6,
+    shadowRadius: 8,
+    elevation: 8,
   },
+  placeMarkerVisited: {
+    borderColor: "#4ade80",
+    backgroundColor: "rgba(74,222,128,0.1)",
+    shadowColor: "#4ade80",
+  },
+  placeText: { fontSize: 16 },
 });

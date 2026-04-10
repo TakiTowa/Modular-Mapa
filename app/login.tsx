@@ -1,30 +1,31 @@
 import { router } from "expo-router";
 import { useState } from "react";
 import {
-    Alert,
-    ImageBackground,
-    Pressable,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  Alert,
+  ImageBackground,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
 import { loginUser } from "../api/authService";
 
 export default function LoginScreen() {
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
   const handleLogin = async () => {
-    if (!username || !password) {
+    if (!email || !password) {
       Alert.alert("Error", "Completa todos los campos");
       return;
     }
 
-    const result = await loginUser(username, password);
+    const result = await loginUser(email, password);
 
     if (result.success) {
-      Alert.alert("Bienvenido", "Login exitoso");
+      // Como actualizamos el _layout.tsx, router.replace no es estrictamente necesario, 
+      // pero lo dejamos por si la redirección automática tarda unos milisegundos.
       router.replace("/map");
     } else {
       Alert.alert("Error", result.message);
@@ -44,10 +45,12 @@ export default function LoginScreen() {
 
         <TextInput
           style={styles.input}
-          placeholder="Usuario"
+          placeholder="Correo electrónico"
           placeholderTextColor="#94a3b8"
-          value={username}
-          onChangeText={setUsername}
+          keyboardType="email-address"
+          autoCapitalize="none"
+          value={email}
+          onChangeText={setEmail}
         />
 
         <TextInput
@@ -79,62 +82,14 @@ export default function LoginScreen() {
   );
 }
 
+// ... Mantén los mismos estilos (styles) que ya tenías en tu login ...
 const styles = StyleSheet.create({
-  background: {
-    flex: 1,
-  },
-
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(2,6,23,0.45)",
-  },
-
-  container: {
-    flex: 1,
-    justifyContent: "center",
-    paddingHorizontal: 30,
-  },
-
-  title: {
-    fontSize: 32,
-    fontWeight: "bold",
-    color: "#e5e7eb",
-    marginBottom: 40,
-    textAlign: "center",
-  },
-
-  input: {
-    backgroundColor: "rgba(15,23,42,0.85)",
-    borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 14,
-    padding: 15,
-    marginBottom: 18,
-    color: "#e5e7eb",
-  },
-
-  mainButton: {
-    backgroundColor: "#38bdf8",
-    paddingVertical: 16,
-    borderRadius: 16,
-    alignItems: "center",
-    marginTop: 10,
-    marginBottom: 20,
-
-    shadowColor: "#38bdf8",
-    shadowOpacity: 0.9,
-    shadowRadius: 20,
-    elevation: 12,
-  },
-
-  mainButtonText: {
-    color: "#020617",
-    fontSize: 17,
-    fontWeight: "700",
-  },
-
-  link: {
-    color: "#22d3ee",
-    textAlign: "center",
-  },
+  background: { flex: 1 },
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(2,6,23,0.45)" },
+  container: { flex: 1, justifyContent: "center", paddingHorizontal: 30 },
+  title: { fontSize: 32, fontWeight: "bold", color: "#e5e7eb", marginBottom: 40, textAlign: "center" },
+  input: { backgroundColor: "rgba(15,23,42,0.85)", borderWidth: 1, borderColor: "#334155", borderRadius: 14, padding: 15, marginBottom: 18, color: "#e5e7eb" },
+  mainButton: { backgroundColor: "#38bdf8", paddingVertical: 16, borderRadius: 16, alignItems: "center", marginTop: 10, marginBottom: 20, shadowColor: "#38bdf8", shadowOpacity: 0.9, shadowRadius: 20, elevation: 12 },
+  mainButtonText: { color: "#020617", fontSize: 17, fontWeight: "700" },
+  link: { color: "#22d3ee", textAlign: "center" },
 });

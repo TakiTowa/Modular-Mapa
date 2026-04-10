@@ -15,18 +15,21 @@ interface TabItem {
 interface Props {
   activeMenu: MenuType | null;
   onSelect: (menu: MenuType | null) => void;
+  bottomInset?: number;
 }
 
-export default function BottomNav({ activeMenu, onSelect }: Props) {
+export default function BottomNav({ activeMenu, onSelect, bottomInset = 0 }: Props) {
   const tabs: TabItem[] = [
-    { name: "Bitácora", icon: "book-outline", key: "bitacora" },
-    { name: "Favoritos", icon: "star-outline", key: "favoritos" },
-    { name: "Perfil", icon: "person-outline", key: "perfil" },
-    { name: "Ajustes", icon: "settings-outline", key: "ajustes" },
+    { name: "Bitácora", icon: "book-outline",     key: "bitacora"  },
+    { name: "Favoritos", icon: "star-outline",    key: "favoritos" },
+    { name: "Perfil",   icon: "person-outline",   key: "perfil"    },
+    { name: "Ajustes",  icon: "settings-outline", key: "ajustes"   },
   ];
 
-  const activeIndex = tabs.findIndex(tab => tab.key === activeMenu);
-  const indicatorPosition = useRef(new Animated.Value(activeIndex === -1 ? 0 : activeIndex)).current;
+  const activeIndex = tabs.findIndex((tab) => tab.key === activeMenu);
+  const indicatorPosition = useRef(
+    new Animated.Value(activeIndex === -1 ? 0 : activeIndex)
+  ).current;
 
   useEffect(() => {
     if (activeIndex !== -1) {
@@ -45,48 +48,48 @@ export default function BottomNav({ activeMenu, onSelect }: Props) {
   });
 
   return (
-    <View style={styles.wrapper}>
-      <BlurView intensity={40} tint="dark" style={styles.container}>
-        {/* Indicador */}
-        {activeIndex !== -1 && (
-          <Animated.View
-            style={[
-              styles.activeIndicator,
-              {
-                left: indicatorTranslate.interpolate({
-                  inputRange: [0, 100],
-                  outputRange: ["0%", "100%"],
-                }),
-                width: `${100 / tabs.length}%`,
-              },
-            ]}
-          />
-        )}
+    <View style={[styles.wrapper, { bottom: 0 }]}>
+      <BlurView intensity={40} tint="dark" style={styles.blur}>
+        <View style={[styles.container, { paddingBottom: bottomInset || 8 }]}>
+          {/* Indicador superior */}
+          {activeIndex !== -1 && (
+            <Animated.View
+              style={[
+                styles.activeIndicator,
+                {
+                  left: indicatorTranslate.interpolate({
+                    inputRange: [0, 100],
+                    outputRange: ["0%", "100%"],
+                  }),
+                  width: `${100 / tabs.length}%`,
+                },
+              ]}
+            />
+          )}
 
-        {tabs.map((tab, index) => {
-          const isActive = activeMenu === tab.key;
-          const activeIcon = tab.icon.replace("-outline", "") as IconName;
+          {tabs.map((tab, index) => {
+            const isActive = activeMenu === tab.key;
+            const activeIcon = tab.icon.replace("-outline", "") as IconName;
 
-          return (
-            <TouchableOpacity
-              key={index}
-              style={styles.tab}
-              onPress={() => 
-                onSelect(activeMenu === tab.key ? null : tab.key)
-              }
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name={isActive ? activeIcon : tab.icon}
-                size={24}
-                color={isActive ? "#22d3ee" : "#aaa"}
-              />
-              <Text style={[styles.label, isActive && styles.activeText]}>
-                {tab.name}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
+            return (
+              <TouchableOpacity
+                key={index}
+                style={styles.tab}
+                onPress={() => onSelect(activeMenu === tab.key ? null : tab.key)}
+                activeOpacity={0.8}
+              >
+                <Ionicons
+                  name={isActive ? activeIcon : tab.icon}
+                  size={24}
+                  color={isActive ? "#22d3ee" : "#aaa"}
+                />
+                <Text style={[styles.label, isActive && styles.activeText]}>
+                  {tab.name}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </BlurView>
     </View>
   );
@@ -95,17 +98,20 @@ export default function BottomNav({ activeMenu, onSelect }: Props) {
 const styles = StyleSheet.create({
   wrapper: {
     position: "absolute",
-    bottom: 0,
     width: "100%",
+  },
+  blur: {
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+    overflow: "hidden",
   },
   container: {
     flexDirection: "row",
     justifyContent: "space-around",
     alignItems: "center",
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(255,255,255,0.08)",
+    paddingTop: 12,
     backgroundColor: "rgba(10,10,20,0.6)",
+    position: "relative",
   },
   tab: {
     alignItems: "center",

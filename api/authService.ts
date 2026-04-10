@@ -1,71 +1,41 @@
 // api/authService.ts
-// Este archivo simula la autenticación de usuarios usando AsyncStorage.
-// Permite registrar nuevos usuarios y hacer login. Los datos se guardan localmente
-// Se migrara a un backend real más adelante.
-
-import AsyncStorage from "@react-native-async-storage/async-storage";
-
-const USERS_KEY = "APP_USERS";
-
-// Tipo de usuario
-interface User {
-  username: string;
-  email: string;
-  password: string;
-}
-
-// ================================
-// OBTENER USUARIOS
-// ================================
-async function getUsers(): Promise<User[]> {
-  try {
-    const saved = await AsyncStorage.getItem(USERS_KEY);
-    return saved ? JSON.parse(saved) : [];
-  } catch (error) {
-    console.log("Error getting users:", error);
-    return [];
-  }
-}
-
-// ================================
-// GUARDAR USUARIOS
-// ================================
-async function saveUsers(users: User[]) {
-  try {
-    await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-  } catch (error) {
-    console.log("Error saving users:", error);
-  }
-}
+import { supabase } from "./supabase";
 
 // ================================
 // REGISTRAR USUARIO
 // ================================
 export async function registerUser(
-  username: string,
   email: string,
-  password: string
+  password: string,
+  firstName: string,
+  lastName: string,
+  age: string
 ): Promise<{ success: boolean; message: string }> {
-  const users = await getUsers();
 
-  // Verificar si ya existe el username
-  if (users.find((u) => u.username === username)) {
-    return { success: false, message: "El usuario ya existe" };
+  const { data, error } = await supabase.auth.signUp({ email, password });
+
+  if (error) return { success: false, message: error.message };
+
+  if (data.user) {
+    const { error: profileError } = await supabase.from("profiles").insert([
+      {
+        id: data.user.id,
+        email,
+        first_name: firstName,
+        last_name: lastName,
+        age: parseInt(age),
+        total_xp: 0,
+      },
+    ]);
+
+    if (profileError) {
+      console.error("Error creando perfil:", profileError);
+      return {
+        success: false,
+        message: "Usuario creado, pero hubo un error al guardar el perfil.",
+      };
+    }
   }
-
-  // Verificar si ya existe el email
-  if (users.find((u) => u.email === email)) {
-    return { success: false, message: "El correo ya está registrado" };
-  }
-
-  const newUser: User = {
-    username,
-    email,
-    password, // En producción esto debe ir encriptado
-  };
-
-  users.push(newUser);
-  await saveUsers(users);
 
   return { success: true, message: "Usuario creado correctamente" };
 }
@@ -74,20 +44,44 @@ export async function registerUser(
 // LOGIN USUARIO
 // ================================
 export async function loginUser(
-  username: string,
+  email: string,
   password: string
 ): Promise<{ success: boolean; message: string }> {
-  const users = await getUsers();
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
 
-  const user = users.find((u) => u.username === username);
-
-  if (!user) {
-    return { success: false, message: "Usuario no encontrado" };
-  }
-
-  if (user.password !== password) {
-    return { success: false, message: "Contraseña incorrecta" };
-  }
+  if (error) return { success: false, message: error.message };
 
   return { success: true, message: "Login exitoso" };
+}
+
+// ================================
+// LOGOUT USUARIO
+// ================================
+// Llama a esto desde el menú del mapa para cerrar sesión.
+// El onAuthStateChange en _layout.tsx detectará el cambio
+// y redirigirá automáticamente al login.
+export async function logoutUser(): Promise<{ success: boolean; message: string }> {
+  const { error } = await supabase.auth.signOut();
+
+  if (error) return { success: false, message: error.message };
+
+  return { success: true, message: "Sesión cerrada" };
+}
+
+// ================================
+// OBTENER DATOS DEL PERFIL
+// ================================
+export async function getFullUserData() {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("id", user.id)
+    .single();
+
+  return error ? null : data;
 }

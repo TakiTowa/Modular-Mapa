@@ -1,67 +1,92 @@
 // api/explorationService.ts
-// este archivo maneja la lógica de almacenamiento y recuperación de las celdas 
-// exploradas por el usuario. Utiliza AsyncStorage para guardar los datos localmente 
-// en el dispositivo. Las funciones principales son getExploredCells para obtener 
-// la lista de celdas exploradas y exploreCell para marcar una celda como explorada.
-// simula el uso de una api, para despues poder migrar a un backend real.
+import { supabase } from "./supabase";
 
-import AsyncStorage from "@react-native-async-storage/async-storage";
-
-const STORAGE_KEY = "EXPLORED_CELLS";
-
+// Variables para el sistema de lotes (Batching)
+let pendingCells: string[] = [];
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+const BATCH_SIZE = 10; // Enviar a la BD cada 10 celdas
+const SYNC_INTERVAL_MS = 15000; // o cada 15 segundos
 
 // ================================
-// OBTENER CELDAS
+// OBTENER CELDAS EXPLORADAS
 // ================================
 export async function getExploredCells(): Promise<string[]> {
   try {
-    const saved = await AsyncStorage.getItem(STORAGE_KEY);
-    if (!saved) return [];
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) return [];
 
-    const parsed = JSON.parse(saved);
+    const { data, error } = await supabase
+      .from('explored_cells')
+      .select('cell_key')
+      .eq('user_id', userData.user.id);
 
-    if (Array.isArray(parsed)) {
-      return parsed;
+    if (error) {
+      console.log("Error obteniendo celdas de Supabase:", error);
+      return [];
     }
 
-    if (typeof parsed === "object" && parsed !== null) {
-      return Object.keys(parsed);
-    }
-
-    return [];
+    // Convertimos la respuesta de Supabase a un arreglo simple de strings
+    return data.map((row) => row.cell_key);
   } catch (error) {
-    console.log("Error getting explored cells:", error);
+    console.log("Error en getExploredCells:", error);
     return [];
   }
 }
 
+// ================================
+// EXPLORAR CELDA (Sistema de Lotes)
+// ================================
+// Esta función reemplaza a tu antigua exploreCell
+export function queueCellForSync(cellKey: string) {
+  // 1. Agregamos a la cola si no está ya
+  if (!pendingCells.includes(cellKey)) {
+    pendingCells.push(cellKey);
+  }
+
+  // 2. Revisamos si ya llegamos al límite para enviar
+  if (pendingCells.length >= BATCH_SIZE) {
+    flushCells();
+  }
+  // 3. Si no, iniciamos el cronómetro (si no estaba corriendo ya)
+  else if (!syncTimer) {
+    syncTimer = setTimeout(flushCells, SYNC_INTERVAL_MS);
+  }
+}
 
 // ================================
-// EXPLORAR CELDA
+// ENVIAR LOTE A SUPABASE (Uso Interno)
 // ================================
-export async function exploreCell(cellKey: string): Promise<boolean> {
-  try {
-    const saved = await AsyncStorage.getItem(STORAGE_KEY);
-    let explored: string[] = saved ? JSON.parse(saved) : [];
+async function flushCells() {
+  if (pendingCells.length === 0) return;
 
-    if (!Array.isArray(explored)) {
-      explored = [];
-    }
+  // Limpiamos el cronómetro
+  if (syncTimer) {
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
 
-    if (explored.includes(cellKey)) {
-      return false;
-    }
+  // Copiamos las celdas y vaciamos la cola original para seguir recibiendo pasos del GPS
+  const cellsToSync = [...pendingCells];
+  pendingCells = [];
 
-    explored.push(cellKey);
+  const { data: userData } = await supabase.auth.getUser();
+  if (!userData.user) return;
 
-    await AsyncStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(explored)
-    );
+  // Preparamos los datos para insertar
+  const payload = cellsToSync.map(key => ({
+    user_id: userData.user.id,
+    cell_key: key
+  }));
 
-    return true;
-  } catch (error) {
-    console.log("Error exploring cell:", error);
-    return false;
+  // Upsert: Si la celda ya existe, la ignora sin tirar error (gracias al UNIQUE constraint)
+  const { error } = await supabase
+    .from('explored_cells')
+    .upsert(payload, { onConflict: 'user_id,cell_key', ignoreDuplicates: true });
+
+  if (error) {
+    console.log("Error sincronizando lote de celdas:", error);
+    // Si falla la red, podríamos regresar las celdas a la cola: pendingCells.push(...cellsToSync);
+  } else {
+    console.log(`Se guardaron ${cellsToSync.length} celdas en Supabase`);
   }
 }

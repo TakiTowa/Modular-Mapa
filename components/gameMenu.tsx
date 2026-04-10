@@ -17,7 +17,11 @@ import PerfilMenu from "./menus/perfil";
 
 const { height } = Dimensions.get("window");
 
-export default function GameMenu() {
+interface Props {
+  bottomInset?: number;
+}
+
+export default function GameMenu({ bottomInset = 0 }: Props) {
   const [menu, setMenu] = useState<MenuType | null>(null);
 
   const translateY = useRef(new Animated.Value(height)).current;
@@ -56,33 +60,23 @@ export default function GameMenu() {
 
   useEffect(() => {
     const backAction = () => {
-      if (menu) {
-        setMenu(null);
-        return true;
-      }
+      if (menu) { setMenu(null); return true; }
       return false;
     };
-
-    const subscription = BackHandler.addEventListener(
-      "hardwareBackPress",
-      backAction
-    );
-
+    const subscription = BackHandler.addEventListener("hardwareBackPress", backAction);
     return () => subscription.remove();
   }, [menu]);
 
+  // Altura real del BottomNav: 70px aprox + safe area bottom
+  const navHeight = 70 + bottomInset;
+
   const renderContent = () => {
     switch (menu) {
-      case "perfil":
-        return <PerfilMenu />;
-      case "bitacora":
-        return <BitacoraMenu />;
-      case "favoritos":
-        return <FavoritosMenu />;
-      case "ajustes":
-        return <AjustesMenu />;
-      default:
-        return null;
+      case "perfil":    return <PerfilMenu />;
+      case "bitacora":  return <BitacoraMenu />;
+      case "favoritos": return <FavoritosMenu />;
+      case "ajustes":   return <AjustesMenu />;
+      default:          return null;
     }
   };
 
@@ -90,32 +84,24 @@ export default function GameMenu() {
     <>
       {menu && (
         <>
-          <Animated.View
-            style={[StyleSheet.absoluteFillObject, { opacity }]}
-          >
-            <BlurView
-              intensity={60}
-              tint="dark"
-              style={StyleSheet.absoluteFillObject}
-            />
-            <View
-              style={[
-                StyleSheet.absoluteFillObject,
-                { backgroundColor: "rgba(0,0,0,0.75)" },
-              ]}
-            />
+          {/* Fondo oscuro */}
+          <Animated.View style={[StyleSheet.absoluteFillObject, { opacity }]}>
+            <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
+            <View style={[StyleSheet.absoluteFillObject, { backgroundColor: "rgba(0,0,0,0.75)" }]} />
           </Animated.View>
 
+          {/* Toca fuera para cerrar */}
           <TouchableOpacity
-            style={StyleSheet.absoluteFillObject}
+            style={[StyleSheet.absoluteFillObject, { bottom: navHeight }]}
             activeOpacity={1}
             onPress={() => setMenu(null)}
           />
 
+          {/* Panel de contenido */}
           <Animated.View
             style={[
               styles.panelContainer,
-              { transform: [{ translateY }] },
+              { bottom: navHeight, transform: [{ translateY }] },
             ]}
           >
             <BlurView intensity={70} tint="dark" style={styles.panel}>
@@ -125,7 +111,7 @@ export default function GameMenu() {
         </>
       )}
 
-      <BottomNav activeMenu={menu} onSelect={setMenu} />
+      <BottomNav activeMenu={menu} onSelect={setMenu} bottomInset={bottomInset} />
     </>
   );
 }
@@ -134,13 +120,12 @@ const styles = StyleSheet.create({
   panelContainer: {
     position: "absolute",
     top: 0,
-    bottom: 0,
     width: "100%",
   },
   panel: {
     flex: 1,
     padding: 20,
-    paddingTop: 60,
+    paddingTop: 60,   // espacio para el status bar (el panel va de top:0 a bottom:navHeight)
     overflow: "hidden",
   },
 });
