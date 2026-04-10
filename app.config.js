@@ -3,7 +3,8 @@ import 'dotenv/config';
 export default {
   expo: {
     name: "niebla-go",
-    slug: "niebla-go",
+    slug: "niebla-go-hernandez", // <-- Cambio de slug
+    owner: "hernandez.0717",     // <-- Agregamos tu usuario
     version: "1.0.0",
     orientation: "portrait",
     icon: "./assets/images/icon.png",
@@ -22,7 +23,7 @@ export default {
 
     extra: {
       eas: {
-        projectId: "c108b70f-834b-4c8b-b44f-eb5ca35f733a"
+        projectId: "b5b6910d-f86c-4061-83ac-89a6a6542a2a" // <-- El ID nuevo y correcto
       }
     }
   }
