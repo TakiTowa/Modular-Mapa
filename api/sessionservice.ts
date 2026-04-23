@@ -1,84 +1,100 @@
 // api/sessionService.ts
 import { supabase } from './supabase';
 
-// ID de la sesión activa (en memoria, dura lo que el mapa esté abierto)
+// ================================
+// SINGLETON — solo una sesión activa a la vez
+// ================================
 let activeSessionId: string | null = null;
+let isStarting = false; // guard contra llamadas concurrentes
 
 // ================================
 // INICIAR SESIÓN
-// Llamar cuando el mapa carga
 // ================================
 export async function startSession(): Promise<void> {
-    const { data: userData } = await supabase.auth.getUser();
-    if (!userData.user) return;
-
-    const { data, error } = await supabase
-        .from('sessions')
-        .insert({ user_id: userData.user.id })
-        .select('id')
-        .single();
-
-    if (error) {
-        console.error('Error iniciando sesión:', error);
+    // Evitar sesiones duplicadas
+    if (activeSessionId || isStarting) {
+        console.log("Sesión ya activa:", activeSessionId);
         return;
     }
 
-    activeSessionId = data.id;
-    console.log('Sesión iniciada:', activeSessionId);
+    isStarting = true;
+
+    try {
+        const { data: userData } = await supabase.auth.getUser();
+        if (!userData.user) return;
+
+        // Cerrar sesiones huérfanas previas (sin ended_at) de este usuario
+        await supabase
+            .from('sessions')
+            .update({ ended_at: new Date().toISOString() })
+            .eq('user_id', userData.user.id)
+            .is('ended_at', null);
+
+        // Crear la nueva sesión
+        const { data, error } = await supabase
+            .from('sessions')
+            .insert({ user_id: userData.user.id })
+            .select('id')
+            .single();
+
+        if (error) {
+            console.error('Error iniciando sesión:', error);
+            return;
+        }
+
+        activeSessionId = data.id;
+        console.log('Sesión iniciada:', activeSessionId);
+    } finally {
+        isStarting = false;
+    }
 }
 
 // ================================
 // ACTUALIZAR DISTANCIA
-// Llamar en cada tick del GPS con la distancia incremental en metros
 // ================================
 export async function updateSessionDistance(additionalMeters: number): Promise<void> {
     if (!activeSessionId || additionalMeters <= 0) return;
 
-    // Leemos el valor actual y sumamos
-    const { data, error: readError } = await supabase
+    const { data, error } = await supabase
         .from('sessions')
         .select('distance_meters')
         .eq('id', activeSessionId)
         .single();
 
-    if (readError || !data) return;
+    if (error || !data) return;
 
     const newDistance = (data.distance_meters ?? 0) + additionalMeters;
-    const newSteps = Math.round(newDistance / 0.75); // 1 paso ≈ 0.75m
+    const newSteps = Math.round(newDistance / 0.75);
 
     await supabase
         .from('sessions')
-        .update({
-            distance_meters: newDistance,
-            steps_estimated: newSteps,
-        })
+        .update({ distance_meters: newDistance, steps_estimated: newSteps })
         .eq('id', activeSessionId);
 }
 
 // ================================
 // CERRAR SESIÓN
-// Llamar cuando el componente del mapa se desmonta
 // ================================
 export async function endSession(): Promise<void> {
     if (!activeSessionId) return;
 
+    const sessionId = activeSessionId;
+    activeSessionId = null; // limpiar antes del await para no duplicar
+
     const { error } = await supabase
         .from('sessions')
         .update({ ended_at: new Date().toISOString() })
-        .eq('id', activeSessionId);
+        .eq('id', sessionId);
 
     if (error) {
         console.error('Error cerrando sesión:', error);
     } else {
-        console.log('Sesión cerrada:', activeSessionId);
+        console.log('Sesión cerrada:', sessionId);
     }
-
-    activeSessionId = null;
 }
 
 // ================================
-// VERIFICAR LOGROS BASADOS EN SESIÓN
-// Llamar al cerrar sesión
+// VERIFICAR LOGROS POR SESIÓN
 // ================================
 export async function checkSessionAchievements(
     totalDistanceMeters: number,
@@ -90,15 +106,13 @@ export async function checkSessionAchievements(
     const userId = userData.user.id;
     const unlockedKeys: string[] = [];
 
-    // Logros por distancia total acumulada
     const { data: allSessions } = await supabase
         .from('sessions')
         .select('distance_meters')
         .eq('user_id', userId);
 
     const totalMeters = (allSessions ?? []).reduce(
-        (sum, s) => sum + (s.distance_meters ?? 0),
-        0
+        (sum, s) => sum + (s.distance_meters ?? 0), 0
     );
 
     const distanceChecks: [string, number][] = [
@@ -107,15 +121,10 @@ export async function checkSessionAchievements(
     ];
 
     for (const [key, threshold] of distanceChecks) {
-        if (totalMeters >= threshold) {
-            unlockedKeys.push(key);
-        }
+        if (totalMeters >= threshold) unlockedKeys.push(key);
     }
 
-    // Logro por sesión de +2 horas
-    if (durationMs >= 2 * 60 * 60 * 1000) {
-        unlockedKeys.push('session_2h');
-    }
+    if (durationMs >= 2 * 60 * 60 * 1000) unlockedKeys.push('session_2h');
 
     return unlockedKeys;
 }

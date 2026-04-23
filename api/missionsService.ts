@@ -43,7 +43,15 @@ async function fetchUserMetrics(
     userId: string,
     since: string
 ): Promise<Record<string, number>> {
-    const sinceISO = `${since}T00:00:00Z`;
+    function toLocalMidnightISO(dateISO: string): string {
+        const offsetMinutes = new Date().getTimezoneOffset(); // negativo en UTC-6
+        const offsetMs = offsetMinutes * 60 * 1000;
+        const midnight = new Date(`${dateISO}T00:00:00`);
+        midnight.setTime(midnight.getTime() + offsetMs);
+        return midnight.toISOString();
+    }
+    
+    const sinceISO = toLocalMidnightISO(since);
 
     const [cells, places, sessions] = await Promise.all([
         supabase
