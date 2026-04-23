@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { getExploredCells, queueCellForSync } from "../api/explorationService";
 import { Place, getPlaces, getPopularPlaces, getVisitedPlaceIds, rewardPlaceVisit } from "../api/placesService";
+import { PopularZone, getPopularZones } from "../api/Popularzonesservice";
 import { endSession, startSession, updateSessionDistance } from "../api/sessionService";
 import { GeocodedLocation, RouteResult, formatDistance, formatDuration, getWalkingRoute, reverseGeocode } from "../api/directionsService";
 import { checkExplorationAchievements } from "../api/achievementService";
@@ -84,6 +85,8 @@ const KM2_PER_CELL = (Math.PI * 30 * 30) / 1_000_000;
 const NAV_BAR_HEIGHT = 80;
 const WALKING_SPEED_MS = 1.4;
 const HOTSPOT_NOTIFY_RADIUS_M = 500;
+const OFF_ROUTE_THRESHOLD_M = 40;    // metros fuera de la ruta para recalcular
+const RECALC_COOLDOWN_MS = 15_000;   // mínimo 15s entre recálculos
 
 // ================================
 // HELPERS GEOMETRICOS
@@ -120,6 +123,7 @@ function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: numbe
   return turf.distance(turf.point([lon1, lat1]), turf.point([lon2, lat2]), { units: "meters" });
 }
 
+// Distancia restante en la ruta desde la posicion actual
 function getRemainingDistance(userLat: number, userLon: number, routeCoords: [number, number][]): { meters: number; seconds: number } {
   if (routeCoords.length < 2) return { meters: 0, seconds: 0 };
   const userPt = turf.point([userLon, userLat]);
@@ -129,6 +133,29 @@ function getRemainingDistance(userLat: number, userLon: number, routeCoords: [nu
   const distFromStart = snapped.properties.location ?? 0;
   const remainingMeters = Math.max(0, totalLength - distFromStart);
   return { meters: Math.round(remainingMeters), seconds: Math.round(remainingMeters / WALKING_SPEED_MS) };
+}
+
+// Recortar la polilinea para mostrar solo el tramo restante
+function trimRouteFromPosition(userLat: number, userLon: number, coords: [number, number][]): [number, number][] {
+  if (coords.length < 2) return coords;
+  const userPt = turf.point([userLon, userLat]);
+  const line = turf.lineString(coords);
+  const snapped = turf.nearestPointOnLine(line, userPt, { units: "meters" });
+  const idx = snapped.properties.index ?? 0;
+  const snappedCoord: [number, number] = [
+    snapped.geometry.coordinates[0] as number,
+    snapped.geometry.coordinates[1] as number,
+  ];
+  return [snappedCoord, ...coords.slice(idx + 1)];
+}
+
+// Detectar si el usuario se desvio de la ruta
+function isOffRoute(userLat: number, userLon: number, coords: [number, number][], thresholdMeters = OFF_ROUTE_THRESHOLD_M): boolean {
+  if (coords.length < 2) return false;
+  const userPt = turf.point([userLon, userLat]);
+  const line = turf.lineString(coords);
+  const snapped = turf.nearestPointOnLine(line, userPt, { units: "meters" });
+  return ((snapped.properties.dist ?? 0) * 1000) > thresholdMeters;
 }
 
 function buildHeatmapGeoJSON(places: any[]): FeatureCollection<Point> {
@@ -196,7 +223,7 @@ const hintStyles = StyleSheet.create({
     paddingHorizontal: 16, paddingVertical: 9, borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)", zIndex: 50,
   },
-  icon: { fontSize: 15, color: "rgba(255,255,255,0.75)" },
+  icon: { fontSize: 15 },
   text: { color: "rgba(255,255,255,0.75)", fontSize: 12 },
 });
 
@@ -388,6 +415,9 @@ const modalStyles = StyleSheet.create({
   btnText: { color: "#020617", fontSize: 16, fontWeight: "800" },
 });
 
+// ================================
+// TIPOS
+// ================================
 type CustomDestination = { lon: number; lat: number; geocoded: GeocodedLocation | null; loadingGeocode: boolean };
 
 // ================================
@@ -403,18 +433,21 @@ export default function MapScreen() {
   const [places, setPlaces] = useState<Place[]>([]);
   const [userFavorites, setUserFavorites] = useState<FavoritePlace[]>([]);
   const favoritedIdsRef = useRef<Set<string>>(new Set());
-  const [hotspotIds, setHotspotIds] = useState<Set<string>>(new Set());
   const hotspotDataRef = useRef<Map<string, { visitors: number; visit_percentage: number }>>(new Map());
+  const [hotspotIds, setHotspotIds] = useState<Set<string>>(new Set());
 
-  // Ref de places para usar en callbacks sin dependencias
+  const [popularZones, setPopularZones] = useState<PopularZone[]>([]);
+  const [selectedZone, setSelectedZone] = useState<PopularZone | null>(null);
+  const selectedZoneRef = useRef<PopularZone | null>(null);
+  useEffect(() => { selectedZoneRef.current = selectedZone; }, [selectedZone]);
+
   const placesRef = useRef<Place[]>([]);
   useEffect(() => { placesRef.current = places; }, [places]);
 
   const [visitedSet, setVisitedSet] = useState<Set<string>>(new Set());
   const visitedPlaceIds = useRef<Set<string>>(new Set());
-
   const notifiedHotspotsRef = useRef<Set<string>>(new Set());
-  const pendingDestRef = useRef<{ place: Place } | null>(null);
+  const pendingDestRef = useRef<{ lon: number; lat: number } | null>(null);
 
   const [rewardToast, setRewardToast] = useState<RewardToast | null>(null);
   const [achievToast, setAchievToast] = useState<AchievementToast | null>(null);
@@ -430,6 +463,8 @@ export default function MapScreen() {
   const [remainingMeters, setRemainingMeters] = useState<number | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const routeCoordsRef = useRef<[number, number][]>([]);
+  const recalcCooldownRef = useRef<number>(0);   // timestamp del ultimo recalculo
+  const isRecalculatingRef = useRef(false);        // guard contra recalculos simultaneos
 
   const [routeSummary, setRouteSummary] = useState<RouteCompleteSummary | null>(null);
   const [calloutFav, setCalloutFav] = useState(false);
@@ -476,28 +511,26 @@ export default function MapScreen() {
   // ── Notificaciones ───────────────────────────────────────
   useEffect(() => {
     requestNotificationPermissions();
-
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data as any;
-      if (data?.type === "hotspot" && data?.place && locationRef.current) {
+      if (data?.type === "hotspot" && data?.place) {
         const place: Place = data.place;
         handlePlaceSelectDirect(place);
         cameraRef.current?.setCamera({
           centerCoordinate: [place.longitude, place.latitude],
           zoomLevel: 16, animationDuration: 800,
         });
-        setTimeout(() => { pendingDestRef.current = { place }; }, 900);
+        pendingDestRef.current = { lon: place.longitude, lat: place.latitude };
       }
     });
-
     return () => sub.remove();
   }, []);
 
   useEffect(() => {
     if (pendingDestRef.current && location && mapReady) {
-      const { place } = pendingDestRef.current;
+      const { lon, lat } = pendingDestRef.current;
       pendingDestRef.current = null;
-      handleNavigateToPlace(place);
+      handleNavigateToCoords(lon, lat);
     }
   }, [location, mapReady]);
 
@@ -571,22 +604,18 @@ export default function MapScreen() {
     };
   }, []);
 
-  // ── Realtime — canal estable sin dependencias ────────────
+  // ── Refresh hotspots ─────────────────────────────────────
   const refreshHotspots = useCallback(async () => {
     const data = await getPopularPlaces();
     if (!data?.length) return;
-
     const newMap = new Map<string, { visitors: number; visit_percentage: number }>();
     data.forEach((p: any) => newMap.set(p.id, { visitors: p.visitors, visit_percentage: p.visit_percentage }));
-
     const prevIds = new Set(hotspotDataRef.current.keys());
     const newHotspots = data.filter((p: any) => !prevIds.has(p.id));
-
     hotspotDataRef.current = newMap;
     setHotspotIds(new Set(newMap.keys()));
     setPopularPlaces(data);
     setHeatmapGeoJSON(buildHeatmapGeoJSON(data));
-
     if (newHotspots.length > 0 && locationRef.current) {
       const { latitude, longitude } = locationRef.current.coords;
       for (const hotspot of newHotspots) {
@@ -612,24 +641,27 @@ export default function MapScreen() {
         }
       }
     }
-  }, []); // sin dependencias, usa refs
+  }, []);
 
-  // Canal realtime con dependencias vacias — vive toda la sesion
+  // ── Refresh zonas ────────────────────────────────────────
+  const refreshZones = useCallback(async () => {
+    const zones = await getPopularZones();
+    setPopularZones(zones);
+  }, []);
+
+  // ── Canal realtime ───────────────────────────────────────
   useEffect(() => {
     const channel = supabase
-      .channel("hotspot-realtime")
+      .channel("map-realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "user_place_visits" },
-        (payload) => {
-          console.log("Realtime evento recibido:", payload);
-          refreshHotspots();
-        }
+        (payload) => { console.log("Realtime visita:", payload); refreshHotspots(); }
       )
-      .subscribe((status) => {
-        console.log("Canal estado:", status);
-      });
-
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "explored_cells" },
+        () => { refreshZones(); }
+      )
+      .subscribe((status) => { console.log("Canal estado:", status); });
     return () => { supabase.removeChannel(channel); };
-  }, []); // sin dependencias
+  }, []);
 
   // ── Logros ───────────────────────────────────────────────
   const showNextAchievement = () => { if (achievQueue.current.length > 0) setAchievToast(achievQueue.current.shift()!); };
@@ -648,17 +680,27 @@ export default function MapScreen() {
 
   const clearAll = () => {
     Animated.timing(calloutOpacity, { toValue: 0, duration: 180, useNativeDriver: true }).start(() => {
-      setSelectedPlace(null); setCustomDest(null); setRoute(null); setRouteGeoJSON(null);
+      setSelectedPlace(null); setSelectedZone(null); setCustomDest(null);
+      setRoute(null); setRouteGeoJSON(null);
       setCustomFavSaved(false); routeCompleted.current = false;
-      setRemainingMeters(null); setRemainingSeconds(null); routeCoordsRef.current = [];
+      setRemainingMeters(null); setRemainingSeconds(null);
+      routeCoordsRef.current = [];
     });
   };
 
   const handlePlaceSelectDirect = (place: Place) => {
-    setCustomDest(null); setRoute(null); setRouteGeoJSON(null); setCustomFavSaved(false);
-    setRemainingMeters(null); setRemainingSeconds(null); routeCoordsRef.current = [];
+    setSelectedZone(null); setCustomDest(null); setRoute(null); setRouteGeoJSON(null);
+    setCustomFavSaved(false); setRemainingMeters(null); setRemainingSeconds(null);
+    routeCoordsRef.current = [];
     setSelectedPlace(place); animateCalloutIn();
     isFavorite(place.id).then(setCalloutFav);
+  };
+
+  const handleZoneSelect = (zone: PopularZone) => {
+    setSelectedPlace(null); setCustomDest(null); setRoute(null); setRouteGeoJSON(null);
+    setCustomFavSaved(false); setRemainingMeters(null); setRemainingSeconds(null);
+    routeCoordsRef.current = [];
+    setSelectedZone(zone); animateCalloutIn();
   };
 
   const handleToggleFavorite = async () => {
@@ -697,18 +739,20 @@ export default function MapScreen() {
   const handleLongPress = async (e: any) => {
     if (routeRef.current) return;
     const [lon, lat] = e.geometry.coordinates as [number, number];
-    setSelectedPlace(null); setRoute(null); setRouteGeoJSON(null); setCustomFavSaved(false);
+    setSelectedPlace(null); setSelectedZone(null); setRoute(null);
+    setRouteGeoJSON(null); setCustomFavSaved(false);
     setCustomDest({ lon, lat, geocoded: null, loadingGeocode: true });
     animateCalloutIn(); showHint(2500);
     const geocoded = await reverseGeocode(lon, lat);
     setCustomDest((prev) => prev ? { ...prev, geocoded, loadingGeocode: false } : null);
   };
 
-  const handleNavigateToPlace = async (place: Place) => {
+  // Navegar a unas coordenadas — usado internamente
+  const handleNavigateToCoords = async (toLon: number, toLat: number) => {
     const loc = locationRef.current;
     if (!loc) return;
     setLoadingRoute(true);
-    const result = await getWalkingRoute(loc.coords.longitude, loc.coords.latitude, place.longitude, place.latitude);
+    const result = await getWalkingRoute(loc.coords.longitude, loc.coords.latitude, toLon, toLat);
     setLoadingRoute(false);
     if (!result) return;
     routeCompleted.current = false;
@@ -724,44 +768,52 @@ export default function MapScreen() {
   };
 
   const handleNavigate = async () => {
-    if (selectedPlaceRef.current) return handleNavigateToPlace(selectedPlaceRef.current);
-    const toLon = customDestRef.current?.lon;
-    const toLat = customDestRef.current?.lat;
-    if (!location || toLon === undefined || toLat === undefined) return;
-    setLoadingRoute(true);
-    const result = await getWalkingRoute(location.coords.longitude, location.coords.latitude, toLon, toLat);
-    setLoadingRoute(false);
-    if (!result) return;
-    routeCompleted.current = false;
-    routeCoordsRef.current = result.coordinates;
-    setRoute(result); setRouteGeoJSON(buildRouteGeoJSON(result.coordinates));
-    setRemainingMeters(Math.round(result.distanceMeters));
-    setRemainingSeconds(Math.round(result.durationSeconds));
-    const bounds = result.coordinates.reduce(
-      (acc, [lon, lat]) => ({ minLon: Math.min(acc.minLon, lon), maxLon: Math.max(acc.maxLon, lon), minLat: Math.min(acc.minLat, lat), maxLat: Math.max(acc.maxLat, lat) }),
-      { minLon: Infinity, maxLon: -Infinity, minLat: Infinity, maxLat: -Infinity }
-    );
-    cameraRef.current?.fitBounds([bounds.maxLon, bounds.maxLat], [bounds.minLon, bounds.minLat], [insets.top + 80, 60, 200, 60], 800);
+    if (selectedPlaceRef.current) return handleNavigateToCoords(selectedPlaceRef.current.longitude, selectedPlaceRef.current.latitude);
+    if (selectedZoneRef.current) return handleNavigateToCoords(selectedZoneRef.current.longitude, selectedZoneRef.current.latitude);
+    const dest = customDestRef.current;
+    if (dest) return handleNavigateToCoords(dest.lon, dest.lat);
   };
 
+  // ── Verificar ruta completada ────────────────────────────
   const checkRouteComplete = async (userLat: number, userLon: number) => {
     const activeRoute = routeRef.current;
     if (!activeRoute || routeCompleted.current) return;
-    const destLon = selectedPlaceRef.current?.longitude ?? customDestRef.current?.lon;
-    const destLat = selectedPlaceRef.current?.latitude ?? customDestRef.current?.lat;
+
+    let destLon: number | undefined;
+    let destLat: number | undefined;
+    let destName = "Destino";
+    let xpReward = 0;
+
+    if (selectedPlaceRef.current) {
+      destLon = selectedPlaceRef.current.longitude;
+      destLat = selectedPlaceRef.current.latitude;
+      destName = selectedPlaceRef.current.name;
+      xpReward = activeRoute.estimatedXp;
+    } else if (selectedZoneRef.current) {
+      destLon = selectedZoneRef.current.longitude;
+      destLat = selectedZoneRef.current.latitude;
+      destName = "Zona activa";
+      xpReward = 0;
+    } else if (customDestRef.current) {
+      destLon = customDestRef.current.lon;
+      destLat = customDestRef.current.lat;
+      destName = customDestRef.current.geocoded?.shortName ?? "Destino";
+      xpReward = activeRoute.estimatedXp;
+    }
+
     if (destLon === undefined || destLat === undefined) return;
     if (getDistanceMeters(userLat, userLon, destLat, destLon) > ROUTE_COMPLETE_RADIUS_M) return;
+
     routeCompleted.current = true;
-    const xp = activeRoute.estimatedXp;
-    const name = selectedPlaceRef.current?.name ?? customDestRef.current?.geocoded?.shortName ?? "Destino";
-    await grantRouteXp(xp);
+    if (xpReward > 0) await grantRouteXp(xpReward);
     const v = await isVibrationEnabled(); if (v) Vibration.vibrate([0, 150, 100, 150, 100, 200]);
-    setRouteSummary({ destName: name, distanceMeters: activeRoute.distanceMeters, durationSeconds: activeRoute.durationSeconds, xpEarned: xp });
-    setRoute(null); setRouteGeoJSON(null); setSelectedPlace(null); setCustomDest(null);
+    setRouteSummary({ destName, distanceMeters: activeRoute.distanceMeters, durationSeconds: activeRoute.durationSeconds, xpEarned: xpReward });
+    setRoute(null); setRouteGeoJSON(null); setSelectedPlace(null); setSelectedZone(null); setCustomDest(null);
     setRemainingMeters(null); setRemainingSeconds(null); routeCoordsRef.current = [];
     calloutOpacity.setValue(0);
   };
 
+  // ── Niebla ───────────────────────────────────────────────
   const fogShape: Feature<Polygon | MultiPolygon> | null = React.useMemo(() => {
     if (!mergedGeometry) return null;
     const world = turf.polygon([[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]]);
@@ -786,6 +838,7 @@ export default function MapScreen() {
       setVisitedSet(new Set(visited));
     });
     loadUserFavorites();
+    refreshZones();
   }, []);
 
   const checkNearbyPlaces = async (lat: number, lon: number, currentPlaces: Place[]) => {
@@ -831,10 +884,39 @@ export default function MapScreen() {
           lastPosition.current = { lat: latitude, lon: longitude };
           await checkRouteComplete(latitude, longitude);
 
+          // ── Actualizar ruta en tiempo real ───────────────
           if (routeCoordsRef.current.length >= 2) {
             const remaining = getRemainingDistance(latitude, longitude, routeCoordsRef.current);
             setRemainingMeters(remaining.meters);
             setRemainingSeconds(remaining.seconds);
+
+            // Recortar la linea visualmente
+            const trimmed = trimRouteFromPosition(latitude, longitude, routeCoordsRef.current);
+            if (trimmed.length >= 2) setRouteGeoJSON(buildRouteGeoJSON(trimmed));
+
+            // Recalcular si se desvio y paso el cooldown
+            const now = Date.now();
+            if (
+              !isRecalculatingRef.current &&
+              isOffRoute(latitude, longitude, routeCoordsRef.current) &&
+              now - recalcCooldownRef.current > RECALC_COOLDOWN_MS
+            ) {
+              const destLon = selectedPlaceRef.current?.longitude ?? selectedZoneRef.current?.longitude ?? customDestRef.current?.lon;
+              const destLat = selectedPlaceRef.current?.latitude ?? selectedZoneRef.current?.latitude ?? customDestRef.current?.lat;
+              if (destLon !== undefined && destLat !== undefined) {
+                isRecalculatingRef.current = true;
+                recalcCooldownRef.current = now;
+                getWalkingRoute(longitude, latitude, destLon, destLat).then((result) => {
+                  isRecalculatingRef.current = false;
+                  if (!result) return;
+                  routeCoordsRef.current = result.coordinates;
+                  setRoute(result);
+                  setRouteGeoJSON(buildRouteGeoJSON(result.coordinates));
+                  setRemainingMeters(Math.round(result.distanceMeters));
+                  setRemainingSeconds(Math.round(result.durationSeconds));
+                });
+              }
+            }
           }
 
           const key = getCellKey(latitude, longitude);
@@ -865,14 +947,14 @@ export default function MapScreen() {
 
   // ── Dimensiones ──────────────────────────────────────────
   const navHeight = 70 + insets.bottom;
-  const hasCallout = (selectedPlace || customDest) && !route;
-  const navDestName = selectedPlace?.name ?? customDest?.geocoded?.shortName ?? "Destino";
+  const hasCallout = (selectedPlace || customDest || selectedZone) && !route;
   const calloutBottom = navHeight + 16;
   const defaultFavName = customDest?.geocoded?.shortName ?? "Mi lugar";
   const defaultFavDesc = customDest?.geocoded?.address ?? "";
   const activePlaceIds = new Set(places.map((p) => p.id));
   const compassBottom = route ? calloutBottom + NAV_BAR_HEIGHT + 8 : navHeight + 16;
   const selectedHotspot = selectedPlace ? hotspotDataRef.current.get(selectedPlace.id) : null;
+  const navDestName = selectedPlace?.name ?? (selectedZone ? "Zona activa" : null) ?? customDest?.geocoded?.shortName ?? "Destino";
 
   // ================================
   // RENDER
@@ -915,12 +997,7 @@ export default function MapScreen() {
               </MapboxGL.ShapeSource>
             )}
 
-            {popularPlaces.filter((p) => !activePlaceIds.has(p.id)).map((p) => (
-              <MapboxGL.PointAnnotation key={`hot-${p.id}`} id={`hot-${p.id}`} coordinate={[p.longitude, p.latitude]}>
-                <View style={styles.hotspotMarker}><Text style={styles.hotspotText}>🔥</Text></View>
-              </MapboxGL.PointAnnotation>
-            ))}
-
+            {/* Places de interes */}
             {places.map((place) => {
               const visited = visitedSet.has(place.id);
               const isSel = selectedPlace?.id === place.id;
@@ -944,6 +1021,23 @@ export default function MapScreen() {
               );
             })}
 
+            {/* Zonas populares */}
+            {popularZones.map((zone) => {
+              const isSel = selectedZone?.id === zone.id;
+              return (
+                <MapboxGL.PointAnnotation
+                  key={`zone-${zone.id}`} id={`zone-${zone.id}`}
+                  coordinate={[zone.longitude, zone.latitude]}
+                  onSelected={() => handleZoneSelect(zone)}>
+                  <View style={[styles.zoneMarker, isSel && styles.placeMarkerSelected]}>
+                    <Text style={styles.zoneText}>🔥</Text>
+                    <Text style={styles.zoneCount}>{zone.explorer_count}</Text>
+                  </View>
+                </MapboxGL.PointAnnotation>
+              );
+            })}
+
+            {/* Favoritos custom */}
             {userFavorites.filter((fav) => !activePlaceIds.has(fav.place_id)).map((fav) => {
               const isSel = selectedPlace?.id === fav.place_id;
               return (
@@ -966,9 +1060,13 @@ export default function MapScreen() {
               </MapboxGL.PointAnnotation>
             )}
 
-            {route && (selectedPlace || customDest) && (
+            {route && (
               <MapboxGL.PointAnnotation key="destination" id="destination"
-                coordinate={[selectedPlace?.longitude ?? customDest!.lon, selectedPlace?.latitude ?? customDest!.lat]}>
+                coordinate={
+                  selectedPlace ? [selectedPlace.longitude, selectedPlace.latitude]
+                    : selectedZone ? [selectedZone.longitude, selectedZone.latitude]
+                      : [customDest!.lon, customDest!.lat]
+                }>
                 <View style={styles.destinationMarker}><Text style={{ fontSize: 22 }}>🏁</Text></View>
               </MapboxGL.PointAnnotation>
             )}
@@ -1005,28 +1103,39 @@ export default function MapScreen() {
         onSave={handleSaveCustomFav} onCancel={() => setSaveFavModal(false)}
       />
 
+      {/* Callout */}
       {hasCallout && (
         <Animated.View style={[styles.callout, { bottom: calloutBottom, opacity: calloutOpacity }]}>
           <View style={{ flex: 1 }}>
             <View style={styles.calloutTypeRow}>
               <Text style={styles.calloutTypeIcon}>
-                {selectedPlace ? (favoritedIdsRef.current.has(selectedPlace.id) ? "♥" : "P") : "*"}
+                {selectedZone ? "🔥" : selectedPlace ? (favoritedIdsRef.current.has(selectedPlace.id) ? "❤️" : "📍") : "📌"}
               </Text>
               <Text style={styles.calloutType}>
-                {selectedPlace
-                  ? hotspotDataRef.current.has(selectedPlace.id)
-                    ? "Punto de interes · Lugar popular"
-                    : "Punto de interes"
-                  : "Destino personalizado"}
+                {selectedZone
+                  ? "Zona activa"
+                  : selectedPlace
+                    ? hotspotDataRef.current.has(selectedPlace.id)
+                      ? "Punto de interes · Lugar popular"
+                      : "Punto de interes"
+                    : "Destino personalizado"}
               </Text>
             </View>
+
             <Text style={styles.calloutName} numberOfLines={1}>
-              {selectedPlace?.name ?? customDest?.geocoded?.shortName ?? (customDest?.loadingGeocode ? "Buscando..." : "Destino")}
+              {selectedZone
+                ? `${selectedZone.explorer_count} exploradores en esta zona`
+                : selectedPlace?.name
+                ?? customDest?.geocoded?.shortName
+                ?? (customDest?.loadingGeocode ? "Buscando..." : "Destino")}
             </Text>
-            {(selectedPlace?.description || customDest?.geocoded?.address) ? (
+
+            {!selectedZone && (selectedPlace?.description || customDest?.geocoded?.address) ? (
               <Text style={styles.calloutDesc} numberOfLines={2}>{selectedPlace?.description ?? customDest?.geocoded?.address}</Text>
             ) : null}
+
             {customDest?.loadingGeocode && <ActivityIndicator size="small" color="#64748b" style={{ alignSelf: "flex-start", marginTop: 4 }} />}
+
             {selectedHotspot && (
               <View style={styles.hotspotInfo}>
                 <Text style={styles.hotspotInfoText}>
@@ -1034,12 +1143,25 @@ export default function MapScreen() {
                 </Text>
               </View>
             )}
+
+            {selectedZone && (
+              <View style={styles.zoneInfo}>
+                <Text style={styles.zoneInfoText}>
+                  {selectedZone.cell_count} zonas exploradas · {selectedZone.explorer_percentage}% de exploradores
+                </Text>
+              </View>
+            )}
+
             <Text style={styles.calloutXp}>
-              {selectedPlace && selectedPlace.reward_xp > 0 ? `+${selectedPlace.reward_xp} XP al llegar`
-                : selectedPlace ? "Destino guardado"
-                  : "XP calculada al trazar ruta"}
+              {selectedZone
+                ? "Sin XP — zona de actividad"
+                : selectedPlace && selectedPlace.reward_xp > 0
+                  ? `+${selectedPlace.reward_xp} XP al llegar`
+                  : selectedPlace ? "Destino guardado"
+                    : "XP calculada al trazar ruta"}
             </Text>
           </View>
+
           <View style={styles.calloutActions}>
             {selectedPlace && (
               <TouchableOpacity style={styles.favBtn} onPress={handleToggleFavorite} disabled={togglingFav}>
@@ -1063,18 +1185,21 @@ export default function MapScreen() {
         </Animated.View>
       )}
 
+      {/* Nav bar con distancia restante en tiempo real */}
       {route && (
         <View style={[styles.navBar, { bottom: calloutBottom }]}>
           <View style={{ flex: 1 }}>
             <Text style={styles.navDest} numberOfLines={1}>{navDestName}</Text>
             <Text style={styles.navDetails}>
               {remainingMeters !== null
-                ? `${formatDistance(remainingMeters)}  ·  ${formatDuration(remainingSeconds ?? 0)}`
-                : `${formatDistance(route.distanceMeters)}  ·  ${formatDuration(route.durationSeconds)}`}
+                ? `${formatDistance(remainingMeters)}  ·  🚶 ${formatDuration(remainingSeconds ?? 0)}`
+                : `${formatDistance(route.distanceMeters)}  ·  🚶 ${formatDuration(route.durationSeconds)}`}
             </Text>
           </View>
           <View style={styles.navRight}>
-            <View style={styles.navXpBadge}><Text style={styles.navXpText}>+{route.estimatedXp} XP</Text></View>
+            {route.estimatedXp > 0 && (
+              <View style={styles.navXpBadge}><Text style={styles.navXpText}>+{route.estimatedXp} XP</Text></View>
+            )}
             <TouchableOpacity style={styles.navCancelBtn} onPress={clearAll}>
               <Text style={styles.navCancelText}>Cancelar</Text>
             </TouchableOpacity>
@@ -1103,22 +1228,25 @@ const styles = StyleSheet.create({
   loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "#020617", justifyContent: "center", alignItems: "center", zIndex: 999 },
   loadingText: { marginTop: 15, color: "#e2e8f0", fontSize: 16, fontWeight: "500" },
   compassBtn: { position: "absolute", right: 20, backgroundColor: "#1e90ff", width: 60, height: 60, borderRadius: 30, justifyContent: "center", alignItems: "center", elevation: 8 },
-  compassText: { fontSize: 22, color: "#fff", fontWeight: "700" },
-  hotspotMarker: { backgroundColor: "rgba(255,69,0,0.8)", padding: 8, borderRadius: 20, borderWidth: 2, borderColor: "#ffeb3b", elevation: 10 },
-  hotspotText: { fontSize: 16, color: "#fff" },
+  compassText: { fontSize: 22 },
   placeMarker: { backgroundColor: "rgba(34,211,238,0.15)", padding: 8, borderRadius: 20, borderWidth: 2, borderColor: "#22d3ee", elevation: 8 },
   placeMarkerVisited: { borderColor: "#4ade80", backgroundColor: "rgba(74,222,128,0.1)" },
   placeMarkerSelected: { borderColor: "#f59e0b", backgroundColor: "rgba(245,158,11,0.15)", elevation: 12 },
   placeMarkerFav: { borderColor: "#ff5a5f", backgroundColor: "rgba(255,90,95,0.12)" },
   placeMarkerHotspot: { borderColor: "#fb923c", backgroundColor: "rgba(251,146,60,0.15)", elevation: 10 },
   favMarker: { backgroundColor: "rgba(255,90,95,0.12)", padding: 8, borderRadius: 20, borderWidth: 2, borderColor: "#ff5a5f", elevation: 8 },
-  placeText: { fontSize: 16, color: "#fff" },
+  placeText: { fontSize: 16 },
+  zoneMarker: { backgroundColor: "rgba(251,146,60,0.2)", padding: 6, borderRadius: 20, borderWidth: 2, borderColor: "#fb923c", elevation: 10, alignItems: "center", flexDirection: "row", gap: 2 },
+  zoneText: { fontSize: 14 },
+  zoneCount: { color: "#fb923c", fontSize: 11, fontWeight: "800" },
   destinationMarker: { backgroundColor: "rgba(10,20,40,0.85)", padding: 6, borderRadius: 16, borderWidth: 2, borderColor: "#22d3ee" },
   hotspotInfo: { flexDirection: "row", alignItems: "center", backgroundColor: "rgba(251,146,60,0.1)", borderRadius: 10, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 4, alignSelf: "flex-start" },
   hotspotInfoText: { color: "#fb923c", fontSize: 11, fontWeight: "600" },
+  zoneInfo: { flexDirection: "row", alignItems: "center", backgroundColor: "rgba(251,146,60,0.1)", borderRadius: 10, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 4, alignSelf: "flex-start" },
+  zoneInfoText: { color: "#fb923c", fontSize: 11, fontWeight: "600" },
   callout: { position: "absolute", left: 16, right: 16, flexDirection: "row", alignItems: "center", backgroundColor: "rgba(10,20,40,0.97)", borderRadius: 22, borderWidth: 1, borderColor: "rgba(34,211,238,0.35)", padding: 16, gap: 12, elevation: 20 },
   calloutTypeRow: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 4 },
-  calloutTypeIcon: { fontSize: 12, color: "#475569" },
+  calloutTypeIcon: { fontSize: 12 },
   calloutType: { color: "#475569", fontSize: 11, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 },
   calloutName: { color: "#fff", fontSize: 16, fontWeight: "700", marginBottom: 2 },
   calloutDesc: { color: "#64748b", fontSize: 12, marginBottom: 4 },
@@ -1128,7 +1256,7 @@ const styles = StyleSheet.create({
   calloutNavBtn: { backgroundColor: "#22d3ee", paddingVertical: 10, paddingHorizontal: 16, borderRadius: 14, minWidth: 68, alignItems: "center" },
   calloutNavText: { color: "#020617", fontWeight: "700", fontSize: 13 },
   calloutCloseBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: "rgba(255,255,255,0.08)", justifyContent: "center", alignItems: "center" },
-  calloutCloseText: { color: "#64748b", fontSize: 14, fontWeight: "700" },
+  calloutCloseText: { color: "#64748b", fontSize: 14 },
   navBar: { position: "absolute", left: 16, right: 16, flexDirection: "row", alignItems: "center", backgroundColor: "rgba(10,20,40,0.97)", borderRadius: 22, borderWidth: 1, borderColor: "rgba(34,211,238,0.35)", paddingVertical: 14, paddingHorizontal: 18, gap: 12, elevation: 20 },
   navDest: { color: "#fff", fontSize: 15, fontWeight: "700", marginBottom: 2 },
   navDetails: { color: "#22d3ee", fontSize: 13, fontWeight: "500" },
